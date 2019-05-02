@@ -3,7 +3,6 @@ package com.germanlizondo.cryptografiachat;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
 
-import android.util.Log;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
@@ -19,10 +18,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
-import java.lang.reflect.Array;
 import java.net.URISyntaxException;
-import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -32,15 +28,11 @@ import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.spec.InvalidKeySpecException;
-import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
 
 import javax.crypto.Cipher;
-import javax.crypto.KeyGenerator;
 import javax.crypto.NoSuchPaddingException;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
@@ -77,10 +69,9 @@ public class ChatActivity extends AppCompatActivity {
 
         try {
             this.keyGen = KeyPairGenerator.getInstance("RSA");
-            this.keyGen.initialize(1024);
+            this.keyGen.initialize(2048);
             this.parellaClaus = keyGen.generateKeyPair();
-            this.xifrarRSA = Cipher.getInstance("RSA/ECB/PKCS1Padding");
-        }catch (NoSuchAlgorithmException | NoSuchPaddingException e){
+        }catch (NoSuchAlgorithmException  e){
              e.fillInStackTrace();
         }
 
@@ -103,7 +94,7 @@ public class ChatActivity extends AppCompatActivity {
 
     public void conncetToSocker(){
         try {
-            socket = IO.socket("http://172.20.22.3:3000");
+            socket = IO.socket("http://192.168.1.76:3000");
             socket.connect();
 
 
@@ -137,21 +128,19 @@ public class ChatActivity extends AppCompatActivity {
 
         /*JSON INIT*/
         try {
-            byte[] missatge = this.message.getMessage().getBytes();
 
-            // Inicialització del xifrador: xifrem amb la clau pública
-            xifrarRSA.init(Cipher.ENCRYPT_MODE, this.publickeyExternal);
 
-            // Xifrat del missatge
-            byte[] missatgeXifrat = xifrarRSA.doFinal(missatge);
+
+            byte[] missatgeXifrat = this.encryptRSA(this.publickeyExternal,this.message.getMessage());
 
             byte[] pKbytes = android.util.Base64.encode(this.parellaClaus.getPublic().getEncoded(),0);
 
+            String dataToSend = android.util.Base64.encodeToString(missatgeXifrat,android.util.Base64.NO_WRAP);
 
             this.jsonMessage = new JSONObject();
-            this.jsonMessage.put("nickname",encryptedDataAes);
-            this.jsonMessage.put("message",new String(missatgeXifrat));
-            this.jsonMessage.put("signatura",new String(this.signData(missatge,this.parellaClaus.getPrivate())));
+            this.jsonMessage.put("nickname",this.username);
+            this.jsonMessage.put("message",dataToSend);
+            this.jsonMessage.put("signatura",new String(this.signData( this.message.getMessage().getBytes(),this.parellaClaus.getPrivate())));
             this.jsonMessage.put("PublicKey",new String(pKbytes));
 
 
@@ -179,16 +168,19 @@ public class ChatActivity extends AppCompatActivity {
                    public void run() {
                        JSONObject data = (JSONObject) args[0];
                        try {
-                           if(validateSignature(decryptData(data.getString("message")) ,
+                 /*          if(validateSignature(decryptDataRSA(data.getString("message")) ,
                                    data.getString("signatura").getBytes(),createPublicKey(data.getString("PublicKey")))){
 
-                               addMessage(data.getString("nickname"),data.getString("message"));
 
+*/
+
+                           arrayMensajes.add(new Message(data.getString("nickname"),decryptDataRSA(parellaClaus.getPrivate(),data.getString("message")).toString()));
+                           setAdapterListMessages();/*
                            }else{
                                Toast toast = Toast.makeText(getApplicationContext(), "Error en la signatura", Toast.LENGTH_SHORT);
                                toast.show();
-                           }
-                       } catch (JSONException e) {
+                           }*/
+                       } catch (JSONException  e) {
                            return;
                        }
 
@@ -272,31 +264,40 @@ public class ChatActivity extends AppCompatActivity {
     }
 
 
-    public void addMessage(String nickname,String message){
+    public void addMessage(String nickname,byte[] message){
 try{
 
-    this.arrayMensajes.add(new Message(nickname,this.decryptData(message).toString()+": HOLA"));
-    this.setAdapterListMessages();
 
-    Toast toast = Toast.makeText(getApplicationContext(), message, Toast.LENGTH_SHORT);
-    toast.show();
+
 }catch (Exception ex){
     ex.printStackTrace();
+
+
 }
 
     }
 
-    public byte[] decryptData(String message){
+    public byte[] decryptDataRSA(PrivateKey publicKey, String encrypted) {
         try{
-
-            this.xifrarRSA.init(Cipher.DECRYPT_MODE, this.parellaClaus.getPrivate());
-            byte[] missatgeDes= this.xifrarRSA.doFinal(message.getBytes());
-            Toast toast = Toast.makeText(getApplicationContext(), missatgeDes.toString(), Toast.LENGTH_SHORT);
+            Toast toast = Toast.makeText(this, encrypted, Toast.LENGTH_SHORT);
             toast.show();
-            return missatgeDes;
-        }catch (Exception ex){
-            ex.printStackTrace();
+            Cipher cipher = Cipher.getInstance("RSA");
+            cipher.init(Cipher.DECRYPT_MODE, publicKey);
+            return cipher.doFinal(android.util.Base64.decode(encrypted,android.util.Base64.NO_WRAP));
+        }catch (Exception e){
+            e.fillInStackTrace();
+            return  null;
+        }
 
+    }
+
+    public byte[] encryptRSA(PublicKey publickey, String message) {
+        try{
+            Cipher cipher = Cipher.getInstance("RSA");
+            cipher.init(Cipher.ENCRYPT_MODE, publickey);
+
+            return cipher.doFinal(message.getBytes());
+        }catch (Exception e){
             return null;
         }
 
@@ -336,7 +337,7 @@ try{
         if ((keySize == 128)||(keySize == 192)||(keySize == 256)) {
             try {
                 byte[] data = text.getBytes();
-                MessageDigest md = MessageDigest.getInstance("SHA − 256");
+                MessageDigest md = MessageDigest.getInstance("SHA−256");
                 byte[] hash = md.digest(data);
                 byte[] key = Arrays.copyOf(hash, keySize/8);
                 sKey = new SecretKeySpec(key, "AES");
