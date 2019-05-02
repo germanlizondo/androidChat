@@ -2,6 +2,7 @@ package com.germanlizondo.cryptografiachat;
 
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
+
 import android.util.Log;
 import android.view.View;
 import android.widget.ArrayAdapter;
@@ -13,20 +14,34 @@ import com.github.nkzawa.emitter.Emitter;
 import com.github.nkzawa.socketio.client.IO;
 import com.github.nkzawa.socketio.client.Socket;
 
+import org.java_websocket.util.Base64;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.lang.reflect.Array;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
+import javax.crypto.NoSuchPaddingException;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -39,22 +54,42 @@ public class ChatActivity extends AppCompatActivity {
    private JSONObject jsonMessage;
    private ArrayList<Message> arrayMensajes;
    private String username;
-   private SecretKey sKey;
-
+   private KeyPairGenerator keyGen;
+   private KeyPair parellaClaus;
+   private Cipher xifrarRSA;
+   private PublicKey publickeyExternal;
+   private SecretKey secretKeyAes;
+   private static final String KEYAES = "hola";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_chat);
 
-        this.sKey = this.keygenKeyGeneration("hola",256);
         this.username = getIntent().getStringExtra("username");
 
         this.arrayMensajes = new ArrayList<Message>();
         this.inputtext = (EditText) findViewById(R.id.messageData);
         this.listMessages = (ListView) findViewById(R.id.listMessages);
+
+        this.secretKeyAes = this.scretKeyAES(KEYAES,256);
+
+
+        try {
+            this.keyGen = KeyPairGenerator.getInstance("RSA");
+            this.keyGen.initialize(1024);
+            this.parellaClaus = keyGen.generateKeyPair();
+            this.xifrarRSA = Cipher.getInstance("RSA/ECB/PKCS1Padding");
+        }catch (NoSuchAlgorithmException | NoSuchPaddingException e){
+             e.fillInStackTrace();
+        }
+
         this.conncetToSocker();
         this.receiveMessage();
+        this.recivedPubliKey();
+
+
+
 
     }
 
@@ -68,9 +103,20 @@ public class ChatActivity extends AppCompatActivity {
 
     public void conncetToSocker(){
         try {
-            socket = IO.socket("http://192.168.1.76:3000");
+            socket = IO.socket("http://172.20.22.3:3000");
             socket.connect();
-        } catch (URISyntaxException e) {
+
+
+
+
+            byte[] pKbytes = android.util.Base64.encode(this.parellaClaus.getPublic().getEncoded(),0);
+
+          JSONObject  json = new JSONObject();
+            json.put("user",this.username);
+            json.put("PublicKey",new String(pKbytes));
+
+            socket.emit("new user",json);
+        } catch (URISyntaxException | JSONException e) {
             Toast toast = Toast.makeText(getApplicationContext(), "No hay connexion", Toast.LENGTH_SHORT);
             toast.show();
         }
@@ -79,17 +125,40 @@ public class ChatActivity extends AppCompatActivity {
     public void sendMessage(View view) {
         this.message = new Message( this.username,this.inputtext.getText().toString());
 
+        byte[] encryptedDataAes;
+        try {
+            Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
+            cipher.init(Cipher.ENCRYPT_MODE, this.secretKeyAes);
+            encryptedDataAes = cipher.doFinal(message.getNickname().getBytes());
+        } catch (Exception ex) {
+            encryptedDataAes = null;
+            System.err.println("Error xifrant les dades: " + ex);
+        }
+
         /*JSON INIT*/
         try {
+            byte[] missatge = this.message.getMessage().getBytes();
 
-            byte[] encryptedMessage = this.encryptData(this.sKey,this.message.getMessage().getBytes("UTF-8"));
+            // Inicialització del xifrador: xifrem amb la clau pública
+            xifrarRSA.init(Cipher.ENCRYPT_MODE, this.publickeyExternal);
+
+            // Xifrat del missatge
+            byte[] missatgeXifrat = xifrarRSA.doFinal(missatge);
+
+            byte[] pKbytes = android.util.Base64.encode(this.parellaClaus.getPublic().getEncoded(),0);
+
 
             this.jsonMessage = new JSONObject();
-            this.jsonMessage.put("nickname",this.message.getNickname());
-            this.jsonMessage.put("message",encryptedMessage.toString());
+            this.jsonMessage.put("nickname",encryptedDataAes);
+            this.jsonMessage.put("message",new String(missatgeXifrat));
+            this.jsonMessage.put("signatura",new String(this.signData(missatge,this.parellaClaus.getPrivate())));
+            this.jsonMessage.put("PublicKey",new String(pKbytes));
+
+
+
         }catch (JSONException e){
             e.printStackTrace();
-        }catch (UnsupportedEncodingException ex){
+        }catch (Exception ex){
             ex.printStackTrace();
         }
 
@@ -110,7 +179,15 @@ public class ChatActivity extends AppCompatActivity {
                    public void run() {
                        JSONObject data = (JSONObject) args[0];
                        try {
-                           addMessage(data.getString("nickname"),data.getString("message"));
+                           if(validateSignature(decryptData(data.getString("message")) ,
+                                   data.getString("signatura").getBytes(),createPublicKey(data.getString("PublicKey")))){
+
+                               addMessage(data.getString("nickname"),data.getString("message"));
+
+                           }else{
+                               Toast toast = Toast.makeText(getApplicationContext(), "Error en la signatura", Toast.LENGTH_SHORT);
+                               toast.show();
+                           }
                        } catch (JSONException e) {
                            return;
                        }
@@ -121,64 +198,159 @@ public class ChatActivity extends AppCompatActivity {
         });
     }
 
+    public void recivedPubliKey(){
+
+        this.socket.on("new user", new Emitter.Listener() {
+            @Override
+            public void call(final Object... args) {
+
+                ChatActivity.this.runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            JSONObject data = (JSONObject) args[0];
+
+                            addPubliKey(data.getString("PublicKey"));
+
+                        } catch (JSONException e) {
+                            return;
+                        }
+
+                    }
+                });
+            }
+        });
+    }
+
+    public void addPubliKey(String key){
+
+        KeyFactory kf;
+
+        try{
+
+            byte[] pubKey = Base64.decode(key.getBytes());
+            X509EncodedKeySpec ks = new X509EncodedKeySpec(pubKey);
+            kf = KeyFactory.getInstance("RSA");
+            this.publickeyExternal = kf.generatePublic(ks);
+            Toast toast = Toast.makeText(getApplicationContext(), "Connected: ", Toast.LENGTH_SHORT);
+            toast.show();
+
+        }catch (NoSuchAlgorithmException | InvalidKeySpecException | IOException ex){
+            ex.fillInStackTrace();
+            Toast toast = Toast.makeText(getApplicationContext(), "Error: ", Toast.LENGTH_SHORT);
+            toast.show();
+
+            ex.fillInStackTrace();
+        }
+
+
+
+
+    }
+
+    public PublicKey createPublicKey(String key){
+
+        KeyFactory kf;
+        try{
+
+            byte[] pubKey = Base64.decode(key.getBytes());
+            X509EncodedKeySpec ks = new X509EncodedKeySpec(pubKey);
+            kf = KeyFactory.getInstance("RSA");
+           PublicKey publicKey = kf.generatePublic(ks);
+
+           return publicKey;
+
+        }catch (NoSuchAlgorithmException | InvalidKeySpecException | IOException ex){
+            ex.fillInStackTrace();
+            Toast toast = Toast.makeText(getApplicationContext(), "Error: ", Toast.LENGTH_SHORT);
+            toast.show();
+
+            ex.fillInStackTrace();
+            return null;
+        }
+
+    }
+
+
     public void addMessage(String nickname,String message){
 try{
 
-   byte[] desencryptedMessage = this.decryptData(this.sKey,message.getBytes("UTF-8"));
-  //  this.arrayMensajes.add(new Message(nickname,desencryptedMessage.toString()));
- //   this.setAdapterListMessages();
+    this.arrayMensajes.add(new Message(nickname,this.decryptData(message).toString()+": HOLA"));
+    this.setAdapterListMessages();
 
     Toast toast = Toast.makeText(getApplicationContext(), message, Toast.LENGTH_SHORT);
     toast.show();
-}catch (UnsupportedEncodingException ex){
+}catch (Exception ex){
     ex.printStackTrace();
 }
 
     }
 
+    public byte[] decryptData(String message){
+        try{
 
-    public SecretKey keygenKeyGeneration(String text,int keySize) {
+            this.xifrarRSA.init(Cipher.DECRYPT_MODE, this.parellaClaus.getPrivate());
+            byte[] missatgeDes= this.xifrarRSA.doFinal(message.getBytes());
+            Toast toast = Toast.makeText(getApplicationContext(), missatgeDes.toString(), Toast.LENGTH_SHORT);
+            toast.show();
+            return missatgeDes;
+        }catch (Exception ex){
+            ex.printStackTrace();
+
+            return null;
+        }
+
+    }
+
+    public byte[] signData(byte[] data, PrivateKey priv) {
+        byte[] signature = null;
+        try {
+            Signature signer = Signature.getInstance("SHA1withRSA");
+            signer.initSign(priv);
+            signer.update(data);
+            signature = signer.sign();
+        } catch (Exception ex) {
+            System.err.println("Error signant les dades: " + ex);
+        }
+        return signature;
+    }
+
+    public boolean validateSignature(byte[] data, byte[] signature, PublicKey pub)
+    {
+        boolean isValid = false;
+        try {
+            Signature signer = Signature.getInstance("SHA1withRSA");
+            signer.initVerify(pub);
+            signer.update(data);
+            isValid = signer.verify(signature);
+        } catch (Exception ex) {
+            System.err.println("Error validant les dades: " + ex);
+        }
+        return isValid;
+    }
+
+
+
+    public SecretKey scretKeyAES(String text,int keySize) {
         SecretKey sKey = null;
         if ((keySize == 128)||(keySize == 192)||(keySize == 256)) {
             try {
-                byte[] data = text.getBytes("UTF-8");
-                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                byte[] data = text.getBytes();
+                MessageDigest md = MessageDigest.getInstance("SHA − 256");
                 byte[] hash = md.digest(data);
-                byte[] key = Arrays.copyOf(hash,keySize/8);
-                sKey = new SecretKeySpec(key,"AES");
-            } catch (NoSuchAlgorithmException ex) {
-                System.err.println("Generador no disponible.");
-            }catch (UnsupportedEncodingException ex){
-                ex.printStackTrace();
+                byte[] key = Arrays.copyOf(hash, keySize/8);
+                sKey = new SecretKeySpec(key, "AES");
+            } catch (Exception ex) {
+                System.err.println("Error generant la clau:" + ex);
             }
         }
         return sKey;
     }
 
 
-    public byte[] encryptData(SecretKey sKey, byte[] data) {
-        byte[] encryptedData = null;
-        try {
-            Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
-            cipher.init(Cipher.ENCRYPT_MODE, sKey);
-            encryptedData = cipher.doFinal(data);
-        } catch (Exception ex) {
-            System.err.println("Error xifrant les dades: " + ex);
-        }
-        return encryptedData;
-    }
 
-    public byte[] decryptData(SecretKey sKey, byte[] data) {
-        byte[] encryptedData = null;
-        try {
-            Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, sKey);
-            encryptedData = cipher.doFinal(data);
-        } catch (Exception ex) {
-            System.err.println("Error xifrant les dades: " + ex);
-        }
-        return encryptedData;
-    }
+
+
     @Override
     public void onDestroy() {
         super.onDestroy();
